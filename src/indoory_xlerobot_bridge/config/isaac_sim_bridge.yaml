@@ -1,0 +1,40 @@
+xlerobot_isaac_sim_zmq_bridge:
+  ros__parameters:
+    sim_host: "127.0.0.1"
+    pub_port: 5555
+    pull_port: 5556
+    rep_port: 5557
+    robot_id: 0
+    command_schema: "auto"
+    command_frame: "body"
+    cmd_vel_topic: "/xlerobot/cmd_vel"
+    joint_target_topic: "/xlerobot/teleop/joint_targets"
+    odom_topic: "/xlerobot/odom"
+    joint_states_topic: "/xlerobot/joint_states"
+    scan_topic: "/xlerobot/scan"
+    scan_mid_topic: "/xlerobot/scan_mid"
+    front_image_topic: "/xlerobot/camera/front/image/compressed"
+    wrist_image_topic: "/xlerobot/camera/wrist/image/compressed"
+    left_wrist_image_topic: "/xlerobot/camera/wrist_left/image/compressed"
+    front_depth_topic: "/xlerobot/depth/front/image/compressed"
+    status_topic: "/xlerobot/isaac/status"
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
+    publish_tf: true
+    publish_odom: true
+    publish_joint_states: true
+    publish_scan: true
+    publish_images: true
+    publish_depth_compressed: true
+    subscribe_joint_targets: true
+    command_rate_hz: 30.0
+    stream_poll_rate_hz: 100.0
+    status_rate_hz: 0.2
+    command_timeout_s: 0.5
+    rpc_timeout_ms: 500
+    max_stream_messages_per_poll: 50
+    max_linear_x: 0.5
+    max_linear_y: 0.5
+    max_angular_z: 1.5
+    arm_joint_pos_target:
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

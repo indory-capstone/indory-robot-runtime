@@ -1,0 +1,12 @@
+name: indoory_pi_bridge
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - pyzmq
+  - msgpack-python
+  - opencv
+  - pyserial
+  - pip
+  - pip:
+      - rplidar-roboticia

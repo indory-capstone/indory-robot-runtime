@@ -1,0 +1,15 @@
+name: indoory_compute_ros
+channels:
+  - conda-forge
+  - robostack-staging
+dependencies:
+  - python=3.10
+  - ros-humble-ros-base
+  - ros-humble-navigation2
+  - ros-humble-slam-toolbox
+  - ros-humble-rosbridge-server
+  - ros-humble-foxglove-bridge
+  - colcon-common-extensions
+  - rosdep
+  - pyzmq
+  - msgpack-python

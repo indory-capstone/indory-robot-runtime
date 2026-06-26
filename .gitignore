@@ -1,0 +1,62 @@
+# Runtime output
+logs/
+run/
+artifacts/
+*.log
+*.pid
+*.out
+nohup.out
+
+# Python cache/artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# ROS / build artifacts
+build/
+install/
+log/
+*.bag
+*.mcap
+*.db3
+
+# Local robot configuration
+.env
+.env.*
+!.env.example
+robot/xlerobot_robot_io.env
+*.local
+*.key
+*.pem
+
+# Model/data/camera artifacts
+data/
+datasets/
+models/
+checkpoints/
+outputs/
+camera_captures/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.gguf
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mov
+*.avi
+
+# Local backup/editor files
+*.bak.*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

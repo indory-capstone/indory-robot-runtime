@@ -1,0 +1,359 @@
+#!/usr/bin/env bash
+# Robot-computer runtime: hardware I/O over fast ZMQ.
+#
+# Runs on the Raspberry Pi / onboard computer:
+#   - accepts base/joint commands over direct fast ZMQ
+#   - drives the Feetech/ST3215 base
+#   - publishes odom/scan/joint state over direct fast ZMQ
+# Compute-side consumers (e.g. indory_pi_bridge) subscribe to the fast ZMQ
+# sockets directly; this runtime no longer ships an in-repo rosbridge adapter.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+ENV_FILE="${ENV_FILE:-robot/xlerobot_robot_io.env}"
+ENV_OVERRIDE_NAMES=(
+  ROSBRIDGE_HOST ROSBRIDGE_PORT ROSBRIDGE_URI ROSBRIDGE_URL ROSBRIDGE_WIRE_FORMAT
+  COMPUTE_PC_HOST CMD_TOPIC JOINT_TARGET_TOPIC JOINT_STATES_TOPIC STATUS_TOPIC
+  XLEROBOT_ID XLEROBOT_PORT1 XLEROBOT_PORT2 PORT1 PORT2
+  BASE_WHEEL_RADIUS_M BASE_RADIUS_M BASE_LEFT_SIGN BASE_BACK_SIGN BASE_RIGHT_SIGN
+  BASE_MAX_RAW_COMMAND BASE_COMMAND_RATE_HZ BASE_FEEDBACK_RATE_HZ JOINT_COMMAND_RATE_HZ
+  JOINT_STATE_RATE_HZ BASE_WATCHDOG_TIMEOUT_S BASE_RECONNECT_DELAY_S BASE_PUBLISH_ODOM
+  BASE_USE_FEEDBACK_ODOM BASE_DISABLE_TORQUE_ON_SHUTDOWN
+  ENABLE_BASE ENABLE_LIDAR XLEROBOT_REALSENSE_RGB_TELEOP ENABLE_DEPTH_SENSOR ENABLE_CAMERA DRY_RUN
+	  LIDAR_SERIAL LIDAR_BAUD LIDAR_FRAME LIDAR_SAMPLES LIDAR_PUBLISH_RATE_HZ
+	  LIDAR_ANGLE_OFFSET_DEG LIDAR_INVERT LIDAR_RANGE_MIN LIDAR_RANGE_MAX
+	  LIDAR_MIN_QUALITY LIDAR_MIN_POINTS_PER_ROTATION SCAN_RATE_HZ SCAN_BINS
+  DEPTH_SENSOR_DEPTH_WIDTH DEPTH_SENSOR_DEPTH_HEIGHT DEPTH_SENSOR_DEPTH_FPS
+  DEPTH_SENSOR_COLOR_WIDTH DEPTH_SENSOR_COLOR_HEIGHT DEPTH_SENSOR_COLOR_FPS
+  DEPTH_SENSOR_DEPTH_PUBLISH_HZ DEPTH_SENSOR_COLOR_PUBLISH_HZ
+  DEPTH_SENSOR_BINARY_ENABLE DEPTH_SENSOR_BINARY_HOST DEPTH_SENSOR_BINARY_PORT
+  DEPTH_SENSOR_BINARY_DEPTH_FORMAT DEPTH_SENSOR_BINARY_COLOR_MODE DEPTH_SENSOR_BINARY_FPS
+  DEPTH_SENSOR_ROSBRIDGE_IMAGE_ENABLE DEPTH_SENSOR_ENABLE_COLOR DEPTH_SENSOR_ENABLE_IMU
+  DEPTH_SENSOR_ALIGN_DEPTH_TO_COLOR DEPTH_SENSOR_IMU_PUBLISH_HZ DEPTH_SENSOR_REQUIRE_USB3
+  DEPTH_SENSOR_JPEG_QUALITY DEPTH_SENSOR_PNG_COMPRESS_LEVEL
+  DEPTH_SENSOR_RTSP_ENABLE DEPTH_SENSOR_RTSP_URL DEPTH_SENSOR_RTSP_FPS
+  DEPTH_SENSOR_RTSP_BITRATE_KBPS DEPTH_SENSOR_RTSP_TRANSPORT
+  ENABLE_USB_CAMERA_RTSP USB_CAMERA_RTSP_ENABLE USB_CAMERA_RTSP_CAMERAS
+  USB_CAMERA_WIDTH USB_CAMERA_HEIGHT USB_CAMERA_FPS USB_CAMERA_INPUT_FORMAT
+  USB_CAMERA_RTSP_BITRATE_KBPS BASE_CAMERA_DEVICE BASE_CAMERA_ROTATE_DEG BASE_CAMERA_RTSP_URL
+  WRIST_LEFT_CAMERA_DEVICE WRIST_LEFT_CAMERA_RTSP_URL WRIST_RIGHT_CAMERA_DEVICE
+  WRIST_LEFT_CAMERA_ROTATE_DEG WRIST_RIGHT_CAMERA_ROTATE_DEG WRIST_RIGHT_CAMERA_RTSP_URL
+  CAMERA_DEVICE CAMERA_TOPIC CAMERA_INFO_TOPIC CAMERA_FRAME
+  CAMERA_RATE_HZ CAMERA_JPEG_QUALITY LEROBOT_ROOT XLE_ROBOT_VENV XLE_ROBOT_CONDA_ENV
+  XLE_ROBOT_CONDA_SH USE_VENV
+	  START_ISAAC_COMPAT_GATEWAY ISAAC_COMPAT_BIND_HOST ISAAC_COMPAT_PUB_PORT
+  ISAAC_COMPAT_PULL_PORT ISAAC_COMPAT_REP_PORT ISAAC_COMPAT_ROBOT_ID
+  ISAAC_COMPAT_NUM_ROBOTS ISAAC_COMPAT_LOG_LEVEL ISAAC_COMPAT_SCAN_TOPIC
+  ISAAC_COMPAT_ODOM_TOPIC ISAAC_COMPAT_CMD_VEL_TOPIC ISAAC_COMPAT_JOINT_TARGET_TOPIC
+  ISAAC_COMPAT_SCAN_FRAME ISAAC_COMPAT_BASE_FRAME ISAAC_COMPAT_STARTUP_S
+  ISAAC_COMPAT_ALLOW_RAW_JOINT_TARGETS
+	  ENABLE_FAST_ZMQ FAST_ZMQ_BIND_HOST FAST_ZMQ_PUB_PORT FAST_ZMQ_PULL_PORT
+	  FAST_ZMQ_REP_PORT FAST_ZMQ_ROBOT_ID FAST_ZMQ_PUB_HWM FAST_ZMQ_PULL_HWM
+	  FAST_TF_PUBLISH_RATE_HZ FAST_TF_HEAD_PAN_ZERO_TICK FAST_TF_HEAD_TILT_ZERO_TICK
+	  FAST_TF_HEAD_PAN_OFFSET_DEG FAST_TF_HEAD_TILT_OFFSET_DEG
+	  FAST_ZMQ_WEB_LINEAR_SPEED_MPS FAST_ZMQ_WEB_STRAFE_SPEED_MPS
+	  FAST_ZMQ_WEB_YAW_SPEED_DEGPS
+)
+declare -A ENV_OVERRIDES=()
+for name in "${ENV_OVERRIDE_NAMES[@]}"; do
+  if [[ -v $name ]]; then
+    ENV_OVERRIDES[$name]="${!name}"
+  fi
+done
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+for name in "${!ENV_OVERRIDES[@]}"; do
+  export "$name=${ENV_OVERRIDES[$name]}"
+done
+
+: "${XLE_ROBOT_VENV:=$HOME/xlerobot-io-venv}"
+: "${XLE_ROBOT_CONDA_ENV:=lerobot}"
+: "${XLE_ROBOT_CONDA_SH:=$HOME/.miniforge3/etc/profile.d/conda.sh}"
+: "${LEROBOT_ROOT:=$HOME/lerobot}"
+: "${USE_VENV:=true}"
+: "${ROSBRIDGE_HOST:=127.0.0.1}"
+: "${ROSBRIDGE_PORT:=9090}"
+: "${START_ISAAC_COMPAT_GATEWAY:=false}"
+: "${ENABLE_FAST_ZMQ:=true}"
+: "${FAST_ZMQ_BIND_HOST:=0.0.0.0}"
+: "${FAST_ZMQ_PUB_PORT:=8855}"
+: "${FAST_ZMQ_PULL_PORT:=8856}"
+: "${FAST_ZMQ_REP_PORT:=8857}"
+: "${FAST_ZMQ_ROBOT_ID:=0}"
+: "${FAST_ZMQ_PUB_HWM:=4}"
+: "${FAST_ZMQ_PULL_HWM:=1}"
+: "${FAST_ZMQ_WEB_LINEAR_SPEED_MPS:=0.2}"
+: "${FAST_ZMQ_WEB_STRAFE_SPEED_MPS:=${FAST_ZMQ_WEB_LINEAR_SPEED_MPS}}"
+: "${FAST_ZMQ_WEB_YAW_SPEED_DEGPS:=60}"
+: "${FAST_TF_PUBLISH_RATE_HZ:=20}"
+: "${FAST_TF_HEAD_PAN_ZERO_TICK:=1950}"
+: "${FAST_TF_HEAD_TILT_ZERO_TICK:=2055}"
+: "${FAST_TF_HEAD_PAN_OFFSET_DEG:=0}"
+: "${FAST_TF_HEAD_TILT_OFFSET_DEG:=0}"
+truthy() {
+  case "${1,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+: "${XLEROBOT_REALSENSE_RGB_TELEOP:=false}"
+if truthy "$XLEROBOT_REALSENSE_RGB_TELEOP"; then
+  ENABLE_DEPTH_SENSOR=false
+  DEPTH_SENSOR_BINARY_ENABLE=false
+  DEPTH_SENSOR_RTSP_ENABLE=false
+  ENABLE_USB_CAMERA_RTSP=false
+  USB_CAMERA_RTSP_ENABLE=false
+  ENABLE_CAMERA=false
+fi
+if ! truthy "$ENABLE_FAST_ZMQ"; then
+  echo "[warn] ENABLE_FAST_ZMQ=false ignored; hardware I/O uses fast ZMQ internally." >&2
+  ENABLE_FAST_ZMQ=true
+fi
+if [[ -z "${ROSBRIDGE_URI:-}" && -n "${ROSBRIDGE_URL:-}" ]]; then
+  ROSBRIDGE_URI="$ROSBRIDGE_URL"
+fi
+ROSBRIDGE_WIRE_FORMAT=json
+: "${XLEROBOT_LEFT_HEAD_SERIAL_SHORT:=5B14032190}"
+: "${XLEROBOT_RIGHT_BASE_SERIAL_SHORT:=5B3D046415}"
+motor_driver_by_serial() {
+  local serial_short="$1"
+  local fallback="$2"
+  local path=""
+  if [[ -d /dev/serial/by-id ]]; then
+    path="$(find /dev/serial/by-id -maxdepth 1 -type l -name "*${serial_short}*" | sort | head -n 1)"
+  fi
+  if [[ -n "$path" ]]; then
+    printf '%s
+' "$path"
+  else
+    printf '%s
+' "$fallback"
+  fi
+}
+export XLEROBOT_LEFT_HEAD_SERIAL_SHORT XLEROBOT_RIGHT_BASE_SERIAL_SHORT
+: "${CMD_TOPIC:=/xlerobot/cmd_vel}"
+: "${JOINT_TARGET_TOPIC:=/xlerobot/teleop/joint_targets}"
+: "${JOINT_STATES_TOPIC:=/xlerobot/joint_states}"
+: "${XLEROBOT_ID:=indoory_fast}"
+XLEROBOT_PORT1="$(motor_driver_by_serial "$XLEROBOT_LEFT_HEAD_SERIAL_SHORT" "${XLEROBOT_PORT1:-${PORT1:-/dev/ttyACM1}}")"
+XLEROBOT_PORT2="$(motor_driver_by_serial "$XLEROBOT_RIGHT_BASE_SERIAL_SHORT" "${XLEROBOT_PORT2:-${PORT2:-${ROBOT_PORT:-/dev/ttyACM0}}}")"
+export XLEROBOT_PORT1 XLEROBOT_PORT2
+: "${PORT1:=$XLEROBOT_PORT1}"
+: "${PORT2:=$XLEROBOT_PORT2}"
+: "${BASE_WHEEL_RADIUS_M:=0.05}"
+: "${BASE_RADIUS_M:=0.125}"
+: "${BASE_LEFT_SIGN:=1.0}"
+: "${BASE_BACK_SIGN:=1.0}"
+: "${BASE_RIGHT_SIGN:=1.0}"
+: "${BASE_MAX_RAW_COMMAND:=3000}"
+: "${BASE_COMMAND_RATE_HZ:=200}"
+: "${BASE_FEEDBACK_RATE_HZ:=40}"
+: "${JOINT_COMMAND_RATE_HZ:=50}"
+: "${JOINT_STATE_RATE_HZ:=40}"
+: "${BASE_WATCHDOG_TIMEOUT_S:=0.3}"
+: "${BASE_RECONNECT_DELAY_S:=2.0}"
+if [[ -z "${BASE_PUBLISH_ODOM+x}" ]]; then
+  BASE_PUBLISH_ODOM=false
+fi
+case "${START_ISAAC_COMPAT_GATEWAY,,}" in
+  1|true|yes|on) BASE_PUBLISH_ODOM=true ;;
+esac
+if truthy "$START_ISAAC_COMPAT_GATEWAY" && truthy "$ENABLE_FAST_ZMQ"; then
+  echo "[err] START_ISAAC_COMPAT_GATEWAY is the old rosbridge->ZMQ path and conflicts with direct fast ZMQ." >&2
+  echo "      The built-in fast ZMQ runtime already exposes state/command sockets directly." >&2
+  exit 1
+fi
+: "${BASE_USE_FEEDBACK_ODOM:=true}"
+: "${BASE_DISABLE_TORQUE_ON_SHUTDOWN:=false}"
+: "${LIDAR_SERIAL:=/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_12703f59806eef11ba3ee8c2c169b110-if00-port0}"
+: "${LIDAR_SAMPLES:=360}"
+: "${LIDAR_PUBLISH_RATE_HZ:=10}"
+: "${ENABLE_BASE:=true}"
+: "${ENABLE_LIDAR:=true}"
+: "${ENABLE_DEPTH_SENSOR:=true}"
+: "${ENABLE_CAMERA:=false}"
+: "${DRY_RUN:=false}"
+: "${DEPTH_SENSOR_DEPTH_WIDTH:=640}"
+: "${DEPTH_SENSOR_DEPTH_HEIGHT:=480}"
+: "${DEPTH_SENSOR_DEPTH_FPS:=15}"
+: "${DEPTH_SENSOR_COLOR_WIDTH:=640}"
+: "${DEPTH_SENSOR_COLOR_HEIGHT:=480}"
+: "${DEPTH_SENSOR_COLOR_FPS:=15}"
+: "${DEPTH_SENSOR_DEPTH_PUBLISH_HZ:=${DEPTH_SENSOR_DEPTH_FPS}}"
+: "${DEPTH_SENSOR_COLOR_PUBLISH_HZ:=${DEPTH_SENSOR_COLOR_FPS}}"
+: "${DEPTH_SENSOR_BINARY_ENABLE:=false}"
+: "${DEPTH_SENSOR_BINARY_HOST:=${COMPUTE_PC_HOST:-}}"
+: "${DEPTH_SENSOR_BINARY_PORT:=9102}"
+: "${DEPTH_SENSOR_BINARY_DEPTH_FORMAT:=raw16}"
+: "${DEPTH_SENSOR_BINARY_COLOR_MODE:=bgr8}"
+: "${DEPTH_SENSOR_BINARY_FPS:=0}"
+if [[ -z "${DEPTH_SENSOR_ROSBRIDGE_IMAGE_ENABLE+x}" ]]; then
+  case "${DEPTH_SENSOR_BINARY_ENABLE,,}" in
+    1|true|yes|on) DEPTH_SENSOR_ROSBRIDGE_IMAGE_ENABLE=false ;;
+    *) DEPTH_SENSOR_ROSBRIDGE_IMAGE_ENABLE=true ;;
+  esac
+fi
+: "${DEPTH_SENSOR_ENABLE_COLOR:=true}"
+: "${DEPTH_SENSOR_ENABLE_IMU:=true}"
+: "${DEPTH_SENSOR_ALIGN_DEPTH_TO_COLOR:=true}"
+: "${DEPTH_SENSOR_IMU_PUBLISH_HZ:=100}"
+: "${DEPTH_SENSOR_REQUIRE_USB3:=false}"
+: "${DEPTH_SENSOR_RTSP_ENABLE:=false}"
+: "${DEPTH_SENSOR_RTSP_URL:=}"
+: "${DEPTH_SENSOR_RTSP_FPS:=${DEPTH_SENSOR_COLOR_FPS}}"
+: "${DEPTH_SENSOR_RTSP_BITRATE_KBPS:=3000}"
+: "${DEPTH_SENSOR_RTSP_TRANSPORT:=tcp}"
+: "${ENABLE_USB_CAMERA_RTSP:=false}"
+: "${USB_CAMERA_RTSP_ENABLE:=${ENABLE_USB_CAMERA_RTSP}}"
+: "${USB_CAMERA_RTSP_CAMERAS:=base,wrist_left,wrist_right}"
+: "${USB_CAMERA_WIDTH:=640}"
+: "${USB_CAMERA_HEIGHT:=480}"
+: "${USB_CAMERA_FPS:=15}"
+: "${USB_CAMERA_INPUT_FORMAT:=mjpeg}"
+: "${USB_CAMERA_RTSP_BITRATE_KBPS:=1500}"
+: "${BASE_CAMERA_DEVICE:=/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.3:1.0-video-index0}"
+: "${WRIST_LEFT_CAMERA_DEVICE:=/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.4:1.0-video-index0}"
+: "${WRIST_RIGHT_CAMERA_DEVICE:=/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0-video-index0}"
+: "${BASE_CAMERA_ROTATE_DEG:=0}"
+: "${WRIST_LEFT_CAMERA_ROTATE_DEG:=180}"
+: "${WRIST_RIGHT_CAMERA_ROTATE_DEG:=0}"
+: "${CAMERA_DEVICE:=/dev/video0}"
+: "${CAMERA_TOPIC:=/xlerobot/base_camera/image/compressed}"
+: "${CAMERA_INFO_TOPIC:=/xlerobot/base_camera/camera_info}"
+: "${CAMERA_FRAME:=base_camera_optical_frame}"
+: "${CAMERA_RATE_HZ:=${CAMERA_FPS:-10}}"
+: "${CAMERA_JPEG_QUALITY:=80}"
+export XLE_ROBOT_VENV XLE_ROBOT_CONDA_ENV XLE_ROBOT_CONDA_SH LEROBOT_ROOT USE_VENV ROSBRIDGE_HOST ROSBRIDGE_PORT ROSBRIDGE_URI ROSBRIDGE_WIRE_FORMAT CMD_TOPIC JOINT_TARGET_TOPIC JOINT_STATES_TOPIC
+export XLEROBOT_ID XLEROBOT_PORT1 XLEROBOT_PORT2 PORT1 PORT2
+export BASE_WHEEL_RADIUS_M BASE_RADIUS_M BASE_LEFT_SIGN BASE_BACK_SIGN BASE_RIGHT_SIGN BASE_MAX_RAW_COMMAND BASE_COMMAND_RATE_HZ BASE_FEEDBACK_RATE_HZ JOINT_COMMAND_RATE_HZ JOINT_STATE_RATE_HZ BASE_WATCHDOG_TIMEOUT_S BASE_RECONNECT_DELAY_S BASE_PUBLISH_ODOM BASE_USE_FEEDBACK_ODOM BASE_DISABLE_TORQUE_ON_SHUTDOWN
+export ENABLE_BASE ENABLE_LIDAR XLEROBOT_REALSENSE_RGB_TELEOP ENABLE_DEPTH_SENSOR ENABLE_CAMERA DRY_RUN LIDAR_SERIAL
+export DEPTH_SENSOR_DEPTH_WIDTH DEPTH_SENSOR_DEPTH_HEIGHT DEPTH_SENSOR_DEPTH_FPS DEPTH_SENSOR_COLOR_WIDTH DEPTH_SENSOR_COLOR_HEIGHT DEPTH_SENSOR_COLOR_FPS DEPTH_SENSOR_DEPTH_PUBLISH_HZ DEPTH_SENSOR_COLOR_PUBLISH_HZ DEPTH_SENSOR_ENABLE_COLOR DEPTH_SENSOR_ENABLE_IMU DEPTH_SENSOR_ALIGN_DEPTH_TO_COLOR DEPTH_SENSOR_IMU_PUBLISH_HZ
+export DEPTH_SENSOR_REQUIRE_USB3
+export DEPTH_SENSOR_BINARY_ENABLE DEPTH_SENSOR_BINARY_HOST DEPTH_SENSOR_BINARY_PORT DEPTH_SENSOR_BINARY_DEPTH_FORMAT DEPTH_SENSOR_BINARY_COLOR_MODE DEPTH_SENSOR_BINARY_FPS DEPTH_SENSOR_ROSBRIDGE_IMAGE_ENABLE
+export DEPTH_SENSOR_RTSP_ENABLE DEPTH_SENSOR_RTSP_URL DEPTH_SENSOR_RTSP_FPS DEPTH_SENSOR_RTSP_BITRATE_KBPS DEPTH_SENSOR_RTSP_TRANSPORT
+export ENABLE_USB_CAMERA_RTSP USB_CAMERA_RTSP_ENABLE USB_CAMERA_RTSP_CAMERAS USB_CAMERA_WIDTH USB_CAMERA_HEIGHT USB_CAMERA_FPS USB_CAMERA_INPUT_FORMAT USB_CAMERA_RTSP_BITRATE_KBPS
+export BASE_CAMERA_DEVICE BASE_CAMERA_ROTATE_DEG BASE_CAMERA_RTSP_URL
+export WRIST_LEFT_CAMERA_DEVICE WRIST_LEFT_CAMERA_ROTATE_DEG WRIST_LEFT_CAMERA_RTSP_URL
+export WRIST_RIGHT_CAMERA_DEVICE WRIST_RIGHT_CAMERA_ROTATE_DEG WRIST_RIGHT_CAMERA_RTSP_URL
+export CAMERA_DEVICE CAMERA_TOPIC CAMERA_INFO_TOPIC CAMERA_FRAME CAMERA_RATE_HZ CAMERA_JPEG_QUALITY
+export ENABLE_FAST_ZMQ FAST_ZMQ_BIND_HOST FAST_ZMQ_PUB_PORT FAST_ZMQ_PULL_PORT FAST_ZMQ_REP_PORT FAST_ZMQ_ROBOT_ID FAST_ZMQ_PUB_HWM FAST_ZMQ_PULL_HWM FAST_TF_PUBLISH_RATE_HZ FAST_TF_HEAD_PAN_ZERO_TICK FAST_TF_HEAD_TILT_ZERO_TICK FAST_TF_HEAD_PAN_OFFSET_DEG FAST_TF_HEAD_TILT_OFFSET_DEG FAST_ZMQ_WEB_LINEAR_SPEED_MPS FAST_ZMQ_WEB_STRAFE_SPEED_MPS FAST_ZMQ_WEB_YAW_SPEED_DEGPS
+
+activate_python_env() {
+  if [[ "$USE_VENV" == "true" && -f "$XLE_ROBOT_VENV/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "$XLE_ROBOT_VENV/bin/activate"
+    echo "[boot] python venv active: $XLE_ROBOT_VENV"
+    return 0
+  fi
+  if [[ -n "$XLE_ROBOT_CONDA_ENV" && -f "$XLE_ROBOT_CONDA_SH" ]]; then
+    # shellcheck disable=SC1090
+    source "$XLE_ROBOT_CONDA_SH"
+    conda activate "$XLE_ROBOT_CONDA_ENV"
+    echo "[boot] conda env active: $XLE_ROBOT_CONDA_ENV"
+    return 0
+  fi
+  return 1
+}
+
+if ! activate_python_env; then
+  echo "[boot] using system python"
+fi
+
+if [[ -d "$HOME/librealsense/build/Release" ]]; then
+  export PYTHONPATH="$HOME/librealsense/build/Release:${PYTHONPATH:-}"
+fi
+if [[ -d "$LEROBOT_ROOT/src" ]]; then
+  export PYTHONPATH="$LEROBOT_ROOT/src:${PYTHONPATH:-}"
+fi
+
+python3 - <<'PY'
+import importlib.util
+import os
+import sys
+
+dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
+missing = [name for name in ("numpy",) if importlib.util.find_spec(name) is None]
+if (
+    importlib.util.find_spec("serial") is None
+    and os.environ.get("ENABLE_LIDAR", "true").lower() == "true"
+    and not dry_run
+):
+    missing.append("serial")
+if (
+    importlib.util.find_spec("lerobot") is None
+    and os.environ.get("ENABLE_BASE", "true").lower() == "true"
+    and not dry_run
+):
+    missing.append("lerobot")
+if (
+    importlib.util.find_spec("pyrealsense2") is None
+    and os.environ.get("ENABLE_DEPTH_SENSOR", "true").lower() == "true"
+    and not dry_run
+):
+    missing.append("pyrealsense2")
+if os.environ.get("START_ISAAC_COMPAT_GATEWAY", "false").lower() in ("1", "true", "yes", "on"):
+    if importlib.util.find_spec("zmq") is None:
+        missing.append("pyzmq")
+    if importlib.util.find_spec("msgpack") is None:
+        missing.append("msgpack")
+if os.environ.get("ENABLE_FAST_ZMQ", "true").lower() in ("1", "true", "yes", "on"):
+    if importlib.util.find_spec("zmq") is None:
+        missing.append("pyzmq")
+    if importlib.util.find_spec("msgpack") is None:
+        missing.append("msgpack")
+if missing:
+    print("[err] missing Python modules: " + ", ".join(missing))
+    print("      run: robot/setup_robot_io_pi5.sh")
+    sys.exit(1)
+PY
+
+echo "============================================================"
+echo "XLeRobot fast ZMQ robot I/O"
+echo "============================================================"
+echo "wire      : fast zmq (direct)"
+echo "base      : ${ENABLE_BASE}"
+echo "motor bus1: left/head=${XLEROBOT_PORT1} serial=${XLEROBOT_LEFT_HEAD_SERIAL_SHORT} ids left(1..6) head(7,8)"
+echo "motor bus2: right/base=${XLEROBOT_PORT2} serial=${XLEROBOT_RIGHT_BASE_SERIAL_SHORT} ids right(1..6) base(7,8,9)"
+echo "topics    : cmd=${CMD_TOPIC}, joint_targets=${JOINT_TARGET_TOPIC}, joint_states=${JOINT_STATES_TOPIC}"
+echo "base hz   : cmd=${BASE_COMMAND_RATE_HZ}, odom=${BASE_FEEDBACK_RATE_HZ} (publish=${BASE_PUBLISH_ODOM}), joint_cmd=${JOINT_COMMAND_RATE_HZ}, joint_state=${JOINT_STATE_RATE_HZ}"
+echo "lidar     : ${ENABLE_LIDAR}"
+echo "lidar     : samples=${LIDAR_SAMPLES}, publish_hz=${LIDAR_PUBLISH_RATE_HZ}"
+echo "head rgb  : realsense_v4l2_teleop=${XLEROBOT_REALSENSE_RGB_TELEOP}"
+echo "depth     : ${ENABLE_DEPTH_SENSOR} (${DEPTH_SENSOR_DEPTH_WIDTH}x${DEPTH_SENSOR_DEPTH_HEIGHT}@${DEPTH_SENSOR_DEPTH_FPS}, imu=${DEPTH_SENSOR_ENABLE_IMU}, color=${DEPTH_SENSOR_ENABLE_COLOR}, align=${DEPTH_SENSOR_ALIGN_DEPTH_TO_COLOR})"
+echo "depth usb : require_usb3=${DEPTH_SENSOR_REQUIRE_USB3}"
+echo "depth msg : color=${DEPTH_SENSOR_COLOR_PUBLISH_HZ}Hz depth=${DEPTH_SENSOR_DEPTH_PUBLISH_HZ}Hz"
+echo "depth bin : ${DEPTH_SENSOR_BINARY_ENABLE} (${DEPTH_SENSOR_BINARY_HOST:-unset}:${DEPTH_SENSOR_BINARY_PORT}, image=${DEPTH_SENSOR_BINARY_COLOR_MODE}, depth=${DEPTH_SENSOR_BINARY_DEPTH_FORMAT}, fps=${DEPTH_SENSOR_BINARY_FPS}, ros_images=${DEPTH_SENSOR_ROSBRIDGE_IMAGE_ENABLE})"
+echo "fast zmq  : ${ENABLE_FAST_ZMQ} (${FAST_ZMQ_BIND_HOST}:${FAST_ZMQ_PUB_PORT}/${FAST_ZMQ_PULL_PORT}/${FAST_ZMQ_REP_PORT}, robot_id=${FAST_ZMQ_ROBOT_ID}, tf=${FAST_TF_PUBLISH_RATE_HZ}Hz)"
+echo "head tf   : pan_zero=${FAST_TF_HEAD_PAN_ZERO_TICK:-auto}, tilt_zero=${FAST_TF_HEAD_TILT_ZERO_TICK:-auto}, pan_offset=${FAST_TF_HEAD_PAN_OFFSET_DEG}deg, tilt_offset=${FAST_TF_HEAD_TILT_OFFSET_DEG}deg"
+echo "isaac zmq : ${START_ISAAC_COMPAT_GATEWAY} (${ISAAC_COMPAT_BIND_HOST:-127.0.0.1}:${ISAAC_COMPAT_PUB_PORT:-8855}/${ISAAC_COMPAT_PULL_PORT:-8856}/${ISAAC_COMPAT_REP_PORT:-8857}, raw_joints=${ISAAC_COMPAT_ALLOW_RAW_JOINT_TARGETS:-false})"
+echo "depth rtsp: ${DEPTH_SENSOR_RTSP_ENABLE} (${DEPTH_SENSOR_RTSP_URL:-unset}, fps=${DEPTH_SENSOR_RTSP_FPS}, bitrate=${DEPTH_SENSOR_RTSP_BITRATE_KBPS}kbps)"
+echo "camera    : ${ENABLE_CAMERA} (compressed only)"
+if [[ "$ENABLE_CAMERA" == "true" || "$ENABLE_CAMERA" == "1" ]]; then
+  echo "camera dev: ${CAMERA_DEVICE}"
+  echo "camera pub: ${CAMERA_TOPIC}"
+  echo "camera hz : ${CAMERA_RATE_HZ}, jpeg=${CAMERA_JPEG_QUALITY}"
+fi
+echo "dry run   : ${DRY_RUN}"
+echo "============================================================"
+
+ROBOT_IO_PID=""
+cleanup() {
+  set +e
+  if [[ -n "$ROBOT_IO_PID" ]] && kill -0 "$ROBOT_IO_PID" >/dev/null 2>&1; then
+    kill "$ROBOT_IO_PID" >/dev/null 2>&1
+  fi
+  wait "$ROBOT_IO_PID" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+python3 -m robot_io.xlerobot_fast_io "$@" &
+ROBOT_IO_PID="$!"
+
+wait "$ROBOT_IO_PID"
