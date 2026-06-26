@@ -65,7 +65,7 @@ ENABLE_CAMERA=1
 Health check from another terminal:
 
 ```bash
-python tools/fast_robot_client.py --host <robot-ip> health
+python3 tools/fast_robot_client.py --host <robot-ip> health
 ```
 
 ## Hardware Scope
