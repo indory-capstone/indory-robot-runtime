@@ -45,7 +45,26 @@ src/            optional ROS 2 bridge package for compatible environments
 
 ## Quick Start
 
-Install Python dependencies in the robot runtime environment, then run:
+Values written as `<...>` in commands are placeholders. Replace them with local
+hosts or device paths before running the command.
+
+For no-robot evaluation, run the ZMQ runtime in dry-run mode:
+
+```bash
+DRY_RUN=true \
+ENABLE_BASE=false ENABLE_LIDAR=false ENABLE_DEPTH_SENSOR=false ENABLE_CAMERA=false \
+FAST_ZMQ_PUB_PORT=18855 FAST_ZMQ_PULL_PORT=18856 FAST_ZMQ_REP_PORT=18857 \
+./run_xlerobot_rosbridge_io.sh
+```
+
+Health check from another terminal:
+
+```bash
+python3 tools/fast_robot_client.py --host 127.0.0.1 --rep-port 18857 health
+```
+
+For the Raspberry Pi hardware runtime, install the robot dependencies in the
+robot runtime environment, then run:
 
 ```bash
 ./run_xlerobot_rosbridge_io.sh
