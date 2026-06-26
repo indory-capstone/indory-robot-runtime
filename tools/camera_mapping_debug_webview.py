@@ -33,7 +33,8 @@ except Exception as exc:  # pragma: no cover - runtime dependency check
     raise
 
 
-DEFAULT_ENV_FILE = "/home/pi/indoory_ros/robot/xlerobot_robot_io.env"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_ENV_FILE = str(ROOT_DIR / "robot" / "xlerobot_robot_io.env")
 DEFAULT_CAMERA_TOPICS = (
     "rgb.front.0",
     "rgb.wrist_left.0",

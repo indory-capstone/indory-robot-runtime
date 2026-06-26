@@ -4,7 +4,8 @@
 
 set -euo pipefail
 
-ROOT_DIR="${INDOORY_PI_ROOT:-/home/pi/indoory_ros}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${INDORY_ROBOT_RUNTIME_ROOT:-${INDOORY_PI_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 LIVE_STACK="${INDOORY_LIVE_STACK:-$ROOT_DIR/scripts/indoory_live_stack.sh}"
 TELEOP_ROOT="${INDOORY_TELEOP_ROOT:-/home/pi/teleoperation}"
 TELEOP_START="$TELEOP_ROOT/start_indoory_fast_teleop.sh"
